@@ -1,8 +1,7 @@
-from __future__ import absolute_import, unicode_literals
-
 __all__ = ['StandardCollection', 'VertexCollection', 'EdgeCollection']
 
 from numbers import Number
+from typing import List, Optional, Sequence, Tuple, Union
 
 from .api import APIWrapper
 from .cursor import Cursor
