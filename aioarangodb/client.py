@@ -1,6 +1,9 @@
 from __future__ import absolute_import, unicode_literals
 
-import json
+from json import dumps, loads
+from typing import Any, Callable, Optional, Sequence, Union
+
+from pkg_resources import get_distribution
 
 from six import string_types
 
@@ -8,13 +11,15 @@ __all__ = ['ArangoClient']
 
 from .connection import (
     BasicConnection,
+    Connection,
     JWTConnection,
     JWTSuperuserConnection
 )
 from .database import StandardDatabase
 from .exceptions import ServerConnectionError
-from .http import DefaultHTTPClient
+from .http import DefaultHTTPClient, HTTPClient
 from .resolver import (
+    HostResolver,
     SingleHostResolver,
     RandomHostResolver,
     RoundRobinHostResolver
@@ -22,7 +27,7 @@ from .resolver import (
 from .version import __version__
 
 
-class ArangoClient(object):
+class ArangoClient:
     """ArangoDB client.
 
     :param hosts: Host URL or list of URLs (coordinators in a cluster).
@@ -45,23 +50,25 @@ class ArangoClient(object):
     """
 
     def __init__(self,
-                 hosts='http://127.0.0.1:8529',
-                 host_resolver='roundrobin',
-                 http_client=None,
-                 serializer=json.dumps,
-                 deserializer=json.loads):
-        if isinstance(hosts, string_types):
+                 hosts: Union[str, Sequence[str]] ='http://127.0.0.1:8529',
+                 host_resolver: str ='roundrobin',
+                 resolver_max_tries: Optional[int] = None,
+                 http_client: Optional[HTTPClient] =None,
+                 serializer: Callable[..., str] = lambda x: dumps(x),
+                 deserializer: Callable[[str], Any] = lambda x: loads(x),) -> None :
+        if isinstance(hosts, str):
             self._hosts = [host.strip('/') for host in hosts.split(',')]
         else:
             self._hosts = [host.strip('/') for host in hosts]
 
         host_count = len(self._hosts)
+        self._host_resolver: HostResolver
         if host_count == 1:
-            self._host_resolver = SingleHostResolver()
+            self._host_resolver = SingleHostResolver(1, resolver_max_tries)
         elif host_resolver == 'random':
-            self._host_resolver = RandomHostResolver(host_count)
+            self._host_resolver = RandomHostResolver(host_count, resolver_max_tries)
         else:
-            self._host_resolver = RoundRobinHostResolver(host_count)
+            self._host_resolver = RoundRobinHostResolver(host_count, resolver_max_tries)
 
         self._http = http_client or DefaultHTTPClient()
         self._serializer = serializer
@@ -70,6 +77,11 @@ class ArangoClient(object):
 
     def __repr__(self):
         return '<ArangoClient {}>'.format(','.join(self._hosts))
+    
+    async def close(self) -> None:  # pragma: no cover
+        """Close HTTP sessions."""
+        for session in self._sessions:
+            await session.close()
 
     @property
     def hosts(self):
@@ -89,18 +101,14 @@ class ArangoClient(object):
         """
         return __version__
 
-    async def close(self):
-        for session in self._sessions:
-            await session.close()
-
     async def db(
             self,
-            name='_system',
-            username='root',
-            password='',
-            verify=False,
-            auth_method='basic',
-            superuser_token=None):
+            name: str = '_system',
+            username: str = 'root',
+            password: str = '',
+            verify: bool = False,
+            auth_method:str = 'basic',
+            superuser_token: Optional[str] = None)-> StandardDatabase:
         """Connect to an ArangoDB database and return the database API wrapper.
 
         :param name: Database name.
@@ -125,6 +133,8 @@ class ArangoClient(object):
         :raise arango.exceptions.ServerConnectionError: If **verify** was set
             to True and the connection fails.
         """
+        connection: Connection
+        
         if superuser_token is not None:
             connection = JWTSuperuserConnection(
                 hosts=self._hosts,
