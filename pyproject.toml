@@ -6,6 +6,10 @@ authors = ["sumit <sharansumitkumar@gmail.com>"]
 
 [tool.poetry.dependencies]
 python = "^3.10"
+aiohttp = "^3.8.1"
+PyJWT = "^2.3.0"
+six = "^1.16.0"
+aiohttp-retry = "^2.4.6"
 
 [tool.poetry.dev-dependencies]
 

@@ -1,12 +1,9 @@
-from __future__ import absolute_import, unicode_literals
-
 __all__ = ['Foxx']
 
 import os
-
 from aiohttp import MultipartWriter
-
-from .api import APIWrapper
+from typing import Any, BinaryIO, Dict, Optional, Tuple, Union
+from .api import ApiGroup
 from .exceptions import (
     FoxxServiceCreateError,
     FoxxServiceDeleteError,
@@ -31,9 +28,13 @@ from .exceptions import (
     FoxxDownloadError,
 )
 from .request import Request
+from .formatter import format_service_data
+from .response import Response
+from .result import Result
+from .typings import Json, Jsons, Params
 
 
-class Foxx(APIWrapper):
+class Foxx(ApiGroup):
     """Foxx API wrapper.
 
     :param connection: HTTP connection.
@@ -49,29 +50,37 @@ class Foxx(APIWrapper):
         return '<Foxx in {}>'.format(self._conn.db_name)
 
     # noinspection PyMethodMayBeStatic
-    def _encode_file(self, filename):
-        """Encode file into multipart data.
+    def _encode(
+            self,
+            filename: str,
+            config: Optional[Json] = None,
+            dependencies: Optional[Json] = None,
+    ) -> MultipartWriter:
+        """Encode file, configuration and dependencies into multipart data.
 
         :param filename: Full path to the javascript file or zip bundle.
-        :type filename: str | unicode
+        :type filename: str
+        :param config: Configuration values.
+        :type config: dict | None
+        :param dependencies: Dependency settings.
+        :type dependencies: dict | None
         :return: Multipart encoder object
-        :rtype: aiohttp.MultipartWriter
+        :rtype: requests_toolbelt.MultipartEncoder
         """
         extension = os.path.splitext(filename)[1]
-        if extension == '.js':  # pragma: no cover
-            source_type = 'application/javascript'
-        elif extension == '.zip':
-            source_type = 'application/zip'
+        if extension == ".js":  # pragma: no cover
+            source_type = "application/javascript"
+        elif extension == ".zip":
+            source_type = "application/zip"
         else:
-            raise ValueError('File extension must be .zip or .js')
+            raise ValueError("File extension must be .zip or .js")
 
         mpwriter = MultipartWriter()
-        mpwriter.append(
-            open(filename, 'rb').read(),
-            {'CONTENT-TYPE': source_type})
+        mpwriter.append(open(filename, 'rb').read(), {'CONTENT_TYPE': source_type})
+
         return mpwriter
 
-    async def services(self, exclude_system=False):
+    async def services(self, exclude_system: bool = False) -> Result[Jsons]:
         """List installed services.
 
         :param exclude_system: If set to True, system services are excluded.
@@ -86,14 +95,14 @@ class Foxx(APIWrapper):
             params={'excludeSystem': exclude_system}
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxServiceListError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Jsons:
+            if resp.is_success:
+                return [format_service_data(service) for service in resp.body]
+            raise FoxxServiceListError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def service(self, mount):
+    async def service(self, mount: str) -> Result[Json]:
         """Return service metadata.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
@@ -108,46 +117,41 @@ class Foxx(APIWrapper):
             params={'mount': mount}
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxServiceGetError(resp, request)
-
-            if 'manifest' in resp.body:
-                mf = resp.body['manifest']
-                if 'defaultDocument' in mf:
-                    mf['default_document'] = mf.pop('defaultDocument')
-
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxServiceGetError(resp, request)
 
         return await self._execute(request, response_handler)
 
     async def create_service(
             self,
-            mount,
-            source,
-            config=None,
-            dependencies=None,
-            development=None,
-            setup=None,
-            legacy=None):
+            mount: str,
+            source: str,
+            config: Optional[Json] = None,
+            dependencies: Optional[Json] = None,
+            development: Optional[bool] = None,
+            setup: Optional[bool] = None,
+            legacy: Optional[bool] = None,
+    ) -> Result[Json]:
         """Install a new service using JSON definition.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :param source: Fully qualified URL or absolute path on the server file
             system. Must be accessible by the server, or by all servers if in
             a cluster.
-        :type source: str | unicode
+        :type source: str
         :param config: Configuration values.
-        :type config: dict
+        :type config: dict | None
         :param dependencies: Dependency settings.
-        :type dependencies: dict
+        :type dependencies: dict | None
         :param development: Enable development mode.
-        :type development: bool
+        :type development: bool | None
         :param setup: Run service setup script.
-        :type setup: bool
+        :type setup: bool | None
         :param legacy: Install the service in 2.8 legacy compatibility mode.
-        :type legacy: bool
+        :type legacy: bool | None
         :return: Service metadata.
         :rtype: dict
         :raise arango.exceptions.FoxxServiceCreateError: If install fails.
@@ -160,7 +164,7 @@ class Foxx(APIWrapper):
         if legacy is not None:
             params['legacy'] = legacy
 
-        data = {'source': source}
+        data: Json = {'source': source}
         if config is not None:
             data['configuration'] = config
         if dependencies is not None:
@@ -173,32 +177,39 @@ class Foxx(APIWrapper):
             data=data,
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxServiceCreateError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxServiceCreateError(resp, request)
 
         return await self._execute(request, response_handler)
 
     async def create_service_with_file(
             self,
-            mount,
-            filename,
-            development=None,
-            setup=None,
-            legacy=None):
+            mount: str,
+            filename: str,
+            development: Optional[bool] = None,
+            setup: Optional[bool] = None,
+            legacy: Optional[bool] = None,
+            config: Optional[Json] = None,
+            dependencies: Optional[Json] = None,
+    ) -> Result[Json]:
         """Install a new service using a javascript file or zip bundle.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :param filename: Full path to the javascript file or zip bundle.
-        :type filename: str | unicode
+        :type filename: str
         :param development: Enable development mode.
-        :type development: bool
+        :type development: bool | None
         :param setup: Run service setup script.
-        :type setup: bool
+        :type setup: bool | None
         :param legacy: Install the service in 2.8 legacy compatibility mode.
-        :type legacy: bool
+        :type legacy: bool | None
+        :param config: Configuration values.
+        :type config: dict | None
+        :param dependencies: Dependency settings.
+        :type dependencies: dict | None
         :return: Service metadata.
         :rtype: dict
         :raise arango.exceptions.FoxxServiceCreateError: If install fails.
@@ -211,7 +222,7 @@ class Foxx(APIWrapper):
         if legacy is not None:
             params['legacy'] = legacy
 
-        data = self._encode_file(filename)
+        data = self._encode(filename, config, dependencies)
         request = Request(
             method='post',
             endpoint='/_api/foxx',
@@ -220,43 +231,44 @@ class Foxx(APIWrapper):
             headers={'content-type': data.content_type}
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxServiceCreateError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxServiceCreateError(resp, request)
 
         return await self._execute(request, response_handler)
 
     async def update_service(
             self,
-            mount,
-            source=None,
-            config=None,
-            dependencies=None,
-            teardown=None,
-            setup=None,
-            legacy=None,
-            force=None):
+            mount: str,
+            source: str,
+            config: Optional[Json] = None,
+            dependencies: Optional[Json] = None,
+            teardown: Optional[bool] = None,
+            setup: Optional[bool] = None,
+            legacy: Optional[bool] = None,
+            force: Optional[bool] = None,
+    ) -> Result[Json]:
         """Update (upgrade) a service.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :param source: Fully qualified URL or absolute path on the server file
             system. Must be accessible by the server, or by all servers if in
             a cluster.
-        :type source: str | unicode
+        :type source: str
         :param config: Configuration values.
-        :type config: dict
+        :type config: dict | None
         :param dependencies: Dependency settings.
-        :type dependencies: dict
+        :type dependencies: dict | None
         :param teardown: Run service teardown script.
-        :type teardown: bool
+        :type teardown: bool | None
         :param setup: Run service setup script.
-        :type setup: bool
+        :type setup: bool | None
         :param legacy: Update the service in 2.8 legacy compatibility mode.
-        :type legacy: bool
+        :type legacy: bool | None
         :param force: Force update if no service is found.
-        :type force: bool
+        :type force: bool | None
         :return: Updated service metadata.
         :rtype: dict
         :raise arango.exceptions.FoxxServiceUpdateError: If update fails.
@@ -271,7 +283,7 @@ class Foxx(APIWrapper):
         if force is not None:
             params['force'] = force
 
-        data = {}
+        data: Json = {}
         if source is not None:
             data['source'] = source
         if config is not None:
@@ -286,35 +298,42 @@ class Foxx(APIWrapper):
             data=data,
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxServiceUpdateError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxServiceUpdateError(resp, request)
 
         return await self._execute(request, response_handler)
 
     async def update_service_with_file(
             self,
-            mount,
-            filename=None,
-            teardown=None,
-            setup=None,
-            legacy=None,
-            force=None):
+            mount: str,
+            filename: str,
+            teardown: Optional[bool] = None,
+            setup: Optional[bool] = None,
+            legacy: Optional[bool] = None,
+            force: Optional[bool] = None,
+            config: Optional[Json] = None,
+            dependencies: Optional[Json] = None,
+    ) -> Result[Json]:
         """Update (upgrade) a service using a javascript file or zip bundle.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :param filename: Full path to the javascript file or zip bundle.
-        :type filename: str | unicode
+        :type filename: str
         :param teardown: Run service teardown script.
-        :type teardown: bool
+        :type teardown: bool | None
         :param setup: Run service setup script.
-        :type setup: bool
+        :type setup: bool | None
         :param legacy: Update the service in 2.8 legacy compatibility mode.
-        :type legacy: bool
+        :type legacy: bool | None
         :param force: Force update if no service is found.
-        :type force: bool
+        :type force: bool | None
+        :param config: Configuration values.
+        :type config: dict | None
+        :param dependencies: Dependency settings.
+        :type dependencies: dict | None
         :return: Updated service metadata.
         :rtype: dict
         :raise arango.exceptions.FoxxServiceUpdateError: If update fails.
@@ -329,7 +348,7 @@ class Foxx(APIWrapper):
         if force is not None:
             params['force'] = force
 
-        data = self._encode_file(filename)
+        data = self._encode(filename, config, dependencies)
         request = Request(
             method='patch',
             endpoint='/_api/foxx/service',
@@ -338,42 +357,43 @@ class Foxx(APIWrapper):
             headers={'content-type': data.content_type}
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxServiceUpdateError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxServiceUpdateError(resp, request)
 
         return await self._execute(request, response_handler)
 
     async def replace_service(self,
-                        mount,
-                        source,
-                        config=None,
-                        dependencies=None,
-                        teardown=None,
-                        setup=None,
-                        legacy=None,
-                        force=None):
+                              mount: str,
+                              source: str,
+                              config: Optional[Json] = None,
+                              dependencies: Optional[Json] = None,
+                              teardown: Optional[bool] = None,
+                              setup: Optional[bool] = None,
+                              legacy: Optional[bool] = None,
+                              force: Optional[bool] = None,
+                              ) -> Result[Json]:
         """Replace a service by removing the old one and installing a new one.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :param source: Fully qualified URL or absolute path on the server file
             system. Must be accessible by the server, or by all servers if in
             a cluster.
-        :type source: str | unicode
+        :type source: str
         :param config: Configuration values.
-        :type config: dict
+        :type config: dict | None
         :param dependencies: Dependency settings.
-        :type dependencies: dict
+        :type dependencies: dict | None
         :param teardown: Run service teardown script.
-        :type teardown: bool
+        :type teardown: bool | None
         :param setup: Run service setup script.
-        :type setup: bool
+        :type setup: bool | None
         :param legacy: Replace the service in 2.8 legacy compatibility mode.
-        :type legacy: bool
+        :type legacy: bool | None
         :param force: Force install if no service is found.
-        :type force: bool
+        :type force: bool | None
         :return: Replaced service metadata.
         :rtype: dict
         :raise arango.exceptions.FoxxServiceReplaceError: If replace fails.
@@ -388,7 +408,7 @@ class Foxx(APIWrapper):
         if force is not None:
             params['force'] = force
 
-        data = {}
+        data: Json = {}
         if source is not None:
             data['source'] = source
         if config is not None:
@@ -403,35 +423,42 @@ class Foxx(APIWrapper):
             data=data,
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxServiceReplaceError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxServiceReplaceError(resp, request)
 
         return await self._execute(request, response_handler)
 
     async def replace_service_with_file(
             self,
-            mount,
-            filename=None,
-            teardown=None,
-            setup=None,
-            legacy=None,
-            force=None):
+            mount: str,
+            filename: str,
+            teardown: Optional[bool] = None,
+            setup: Optional[bool] = None,
+            legacy: Optional[bool] = None,
+            force: Optional[bool] = None,
+            config: Optional[Json] = None,
+            dependencies: Optional[Json] = None,
+    ) -> Result[Json]:
         """Replace a service using a javascript file or zip bundle.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :param filename: Full path to the javascript file or zip bundle.
-        :type filename: str | unicode
+        :type filename: str
         :param teardown: Run service teardown script.
-        :type teardown: bool
+        :type teardown: bool | None
         :param setup: Run service setup script.
-        :type setup: bool
+        :type setup: bool | None
         :param legacy: Replace the service in 2.8 legacy compatibility mode.
-        :type legacy: bool
+        :type legacy: bool | None
         :param force: Force install if no service is found.
-        :type force: bool
+        :type force: bool | None
+        :param config: Configuration values.
+        :type config: dict | None
+        :param dependencies: Dependency settings.
+        :type dependencies: dict | None
         :return: Replaced service metadata.
         :rtype: dict
         :raise arango.exceptions.FoxxServiceReplaceError: If replace fails.
@@ -446,7 +473,7 @@ class Foxx(APIWrapper):
         if force is not None:
             params['force'] = force
 
-        data = self._encode_file(filename)
+        data = self._encode(filename, config, dependencies)
         request = Request(
             method='put',
             endpoint='/_api/foxx/service',
@@ -455,20 +482,21 @@ class Foxx(APIWrapper):
             headers={'content-type': data.content_type}
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxServiceReplaceError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxServiceReplaceError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def delete_service(self, mount, teardown=None):
+    async def delete_service(self, mount: str, teardown: Optional[bool] = None
+                             ) -> Result[bool]:
         """Uninstall a service.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :param teardown: Run service teardown script.
-        :type teardown: bool
+        :type teardown: bool | None
         :return: True if service was deleted successfully.
         :rtype: bool
         :raise arango.exceptions.FoxxServiceDeleteError: If delete fails.
@@ -483,18 +511,18 @@ class Foxx(APIWrapper):
             params=params
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxServiceDeleteError(resp, request)
-            return True
+        def response_handler(resp: Response) -> bool:
+            if resp.is_success:
+                return True
+            raise FoxxServiceDeleteError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def config(self, mount):
+    async def config(self, mount: str) -> Result[Json]:
         """Return service configuration.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :return: Configuration values.
         :rtype: dict
         :raise arango.exceptions.FoxxConfigGetError: If retrieval fails.
@@ -505,14 +533,14 @@ class Foxx(APIWrapper):
             params={'mount': mount},
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxConfigGetError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxConfigGetError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def update_config(self, mount, config):
+    async def update_config(self, mount: str, config: Json) -> Result[Json]:
         """Update service configuration.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
@@ -530,66 +558,66 @@ class Foxx(APIWrapper):
             data=config
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxConfigUpdateError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxConfigUpdateError(resp, request)
 
         return await self._execute(request, response_handler)
 
     async def replace_config(self, mount, config):
         """Replace service configuration.
 
-        :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
-        :param config: Configuration values. Omitted options are reset to their
-            default values or marked as un-configured.
-        :type config: dict
-        :return: Replaced configuration values.
-        :rtype: dict
-        :raise arango.exceptions.FoxxConfigReplaceError: If replace fails.
-        """
+               :param mount: Service mount path (e.g "/_admin/aardvark").
+               :type mount: str
+               :param config: Configuration values. Omitted options are reset to their
+                   default values or marked as un-configured.
+               :type config: dict
+               :return: Replaced configuration values.
+               :rtype: dict
+               :raise arango.exceptions.FoxxConfigReplaceError: If replace fails.
+               """
         request = Request(
-            method='put',
-            endpoint='/_api/foxx/configuration',
-            params={'mount': mount},
-            data=config
+            method="put",
+            endpoint="/_api/foxx/configuration",
+            params={"mount": mount},
+            data=config,
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxConfigReplaceError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxConfigReplaceError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def dependencies(self, mount):
+    async def dependencies(self, mount: str) -> Result[Json]:
         """Return service dependencies.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :return: Dependency settings.
         :rtype: dict
         :raise arango.exceptions.FoxxDependencyGetError: If retrieval fails.
         """
         request = Request(
-            method='get',
-            endpoint='/_api/foxx/dependencies',
-            params={'mount': mount},
+            method="get",
+            endpoint="/_api/foxx/dependencies",
+            params={"mount": mount},
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxDependencyGetError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxDependencyGetError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def update_dependencies(self, mount, dependencies):
+    async def update_dependencies(self, mount: str, dependencies: Json) -> Result[Json]:
         """Update service dependencies.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :param dependencies: Dependencies settings. Omitted ones are ignored.
         :type dependencies: dict
         :return: Updated dependency settings.
@@ -597,24 +625,24 @@ class Foxx(APIWrapper):
         :raise arango.exceptions.FoxxDependencyUpdateError: If update fails.
         """
         request = Request(
-            method='patch',
-            endpoint='/_api/foxx/dependencies',
-            params={'mount': mount},
-            data=dependencies
+            method="patch",
+            endpoint="/_api/foxx/dependencies",
+            params={"mount": mount},
+            data=dependencies,
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxDependencyUpdateError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxDependencyUpdateError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def replace_dependencies(self, mount, dependencies):
+    async def replace_dependencies(self, mount: str, dependencies: Json) -> Result[Json]:
         """Replace service dependencies.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :param dependencies: Dependencies settings. Omitted ones are disabled.
         :type dependencies: dict
         :return: Replaced dependency settings.
@@ -622,20 +650,20 @@ class Foxx(APIWrapper):
         :raise arango.exceptions.FoxxDependencyReplaceError: If replace fails.
         """
         request = Request(
-            method='put',
-            endpoint='/_api/foxx/dependencies',
-            params={'mount': mount},
-            data=dependencies
+            method="put",
+            endpoint="/_api/foxx/dependencies",
+            params={"mount": mount},
+            data=dependencies,
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxDependencyReplaceError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxDependencyReplaceError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def enable_development(self, mount):
+    async def enable_development(self, mount: str) -> Result[Json]:
         """Put the service into development mode.
 
         While the service is running in development mode, it is reloaded from
@@ -646,96 +674,96 @@ class Foxx(APIWrapper):
         one coordinator is not reflected across other coordinators.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :return: Service metadata.
         :rtype: dict
         :raise arango.exceptions.FoxxDevModeEnableError: If operation fails.
         """
         request = Request(
-            method='post',
-            endpoint='/_api/foxx/development',
-            params={'mount': mount},
+            method="post",
+            endpoint="/_api/foxx/development",
+            params={"mount": mount},
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxDevModeEnableError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxDevModeEnableError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def disable_development(self, mount):
+    async def disable_development(self, mount: str) -> Result[Json]:
         """Put the service into production mode.
 
         In a cluster with multiple coordinators, the services on all other
         coordinators are replaced with the version on the calling coordinator.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :return: Service metadata.
         :rtype: dict
         :raise arango.exceptions.FoxxDevModeDisableError: If operation fails.
         """
         request = Request(
-            method='delete',
-            endpoint='/_api/foxx/development',
-            params={'mount': mount},
+            method="delete",
+            endpoint="/_api/foxx/development",
+            params={"mount": mount},
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxDevModeDisableError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxDevModeDisableError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def readme(self, mount):
+    async def readme(self, mount: str) -> Result[str]:
         """Return the service readme.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :return: Service readme.
-        :rtype: str | unicode
+        :rtype: str
         :raise arango.exceptions.FoxxReadmeGetError: If retrieval fails.
         """
         request = Request(
-            method='get',
-            endpoint='/_api/foxx/readme',
-            params={'mount': mount},
+            method="get",
+            endpoint="/_api/foxx/readme",
+            params={"mount": mount},
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxReadmeGetError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> str:
+            if resp.is_success:
+                return resp.raw_body
+            raise FoxxReadmeGetError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def swagger(self, mount):
+    async def swagger(self, mount: str) -> Result[Json]:
         """Return the Swagger API description for the given service.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :return: Swagger API description.
         :rtype: dict
         :raise arango.exceptions.FoxxSwaggerGetError: If retrieval fails.
         """
         request = Request(
-            method='get',
-            endpoint='/_api/foxx/swagger',
-            params={'mount': mount}
+            method="get", endpoint="/_api/foxx/swagger", params={"mount": mount}
         )
 
-        def response_handler(resp):
+        def response_handler(resp: Response) -> Json:
             if not resp.is_success:
                 raise FoxxSwaggerGetError(resp, request)
-            if 'basePath' in resp.body:
-                resp.body['base_path'] = resp.body.pop('basePath')
-            return resp.body
+
+            result: Json = resp.body
+            if "basePath" in result:
+                result["base_path"] = result.pop("basePath")
+            return result
 
         return await self._execute(request, response_handler)
 
-    async def download(self, mount):
+    async def download(self, mount: str) -> Result[str]:
         """Download service bundle.
 
         When development mode is enabled, a new bundle is created every time.
@@ -743,118 +771,113 @@ class Foxx(APIWrapper):
         on the server.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :return: Service bundle in raw string form.
-        :rtype: str | unicode
+        :rtype: str
         :raise arango.exceptions.FoxxDownloadError: If download fails.
         """
         request = Request(
-            method='post',
-            endpoint='/_api/foxx/download',
-            params={'mount': mount}
+            method="post", endpoint="/_api/foxx/download", params={"mount": mount}
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxDownloadError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> str:
+            if resp.is_success:
+                return resp.raw_body
+            raise FoxxDownloadError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def commit(self, replace=None):
+    async def commit(self, replace: Optional[bool] = None) -> Result[bool]:
         """Commit local service state of the coordinator to the database.
 
         This can be used to resolve service conflicts between coordinators
         that cannot be fixed automatically due to missing data.
 
         :param replace: Overwrite any existing service files in database.
-        :type replace: bool
+        :type replace: bool | None
         :return: True if the state was committed successfully.
         :rtype: bool
         :raise arango.exceptions.FoxxCommitError: If commit fails.
         """
-        params = {}
+        params: Params = {}
         if replace is not None:
-            params['replace'] = replace
+            params["replace"] = replace
 
-        request = Request(
-            method='post',
-            endpoint='/_api/foxx/commit',
-            params=params
-        )
+        request = Request(method="post", endpoint="/_api/foxx/commit", params=params)
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxCommitError(resp, request)
-            return True
+        def response_handler(resp: Response) -> bool:
+            if resp.is_success:
+                return True
+            raise FoxxCommitError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def scripts(self, mount):
+    async def scripts(self, mount: str) -> Result[Json]:
         """List service scripts.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :return: Service scripts.
         :rtype: dict
         :raise arango.exceptions.FoxxScriptListError: If retrieval fails.
         """
         request = Request(
-            method='get',
-            endpoint='/_api/foxx/scripts',
-            params={'mount': mount},
+            method="get",
+            endpoint="/_api/foxx/scripts",
+            params={"mount": mount},
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxScriptListError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_service_data(resp.body)
+            raise FoxxScriptListError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def run_script(self, mount, name, arg=None):
+    async def run_script(self, mount: str, name: str, arg: Any = None) -> Result[Any]:
         """Run a service script.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :param name: Script name.
-        :type name: str | unicode
+        :type name: str
         :param arg: Arbitrary value passed into the script as first argument.
-        :type arg: str | unicode | bool | int | list | dict
+        :type arg: Any
         :return: Result of the script, if any.
-        :rtype: dict
+        :rtype: Any
         :raise arango.exceptions.FoxxScriptRunError: If script fails.
         """
         request = Request(
-            method='post',
-            endpoint='/_api/foxx/scripts/{}'.format(name),
-            params={'mount': mount},
-            data=arg or {}
+            method="post",
+            endpoint=f"/_api/foxx/scripts/{name}",
+            params={"mount": mount},
+            data=arg,
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxScriptRunError(resp, request)
-            return resp.body
+        def response_handler(resp: Response) -> Any:
+            if resp.is_success:
+                return resp.body
+            raise FoxxScriptRunError(resp, request)
 
         return await self._execute(request, response_handler)
 
     async def run_tests(
             self,
-            mount,
-            reporter='default',
-            idiomatic=None,
-            output_format=None,
-            name_filter=None):
+            mount: str,
+            reporter: str = "default",
+            idiomatic: Optional[bool] = None,
+            output_format: Optional[str] = None,
+            name_filter: Optional[str] = None,
+    ) -> Result[str]:
         """Run service tests.
 
         :param mount: Service mount path (e.g "/_admin/aardvark").
-        :type mount: str | unicode
+        :type mount: str
         :param reporter: Test reporter. Allowed values are "default" (simple
             list of test cases), "suite" (object of test cases nested in
             suites), "stream" (raw stream of test results), "xunit" (XUnit or
             JUnit compatible structure), or "tap" (raw TAP compatible stream).
-        :type reporter: str | unicode
+        :type reporter: str
         :param idiomatic: Use matching format for the reporter, regardless of
             the value of parameter **output_format**.
         :type: bool
@@ -864,38 +887,35 @@ class Foxx(APIWrapper):
             When using "tap" reporter, setting this to "text" returns plain
             text TAP report. When using "xunit" reporter, settings this to
             "xml" returns an XML instead of JSONML.
-        :type output_format: str | unicode
+        :type output_format: str
         :param name_filter: Only run tests whose full name (test suite and
             test case) matches the given string.
-        :type name_filter: str | unicode
+        :type name_filter: str
         :return: Reporter output (e.g. raw JSON string, XML, plain text).
-        :rtype: str | unicode
+        :rtype: str
         :raise arango.exceptions.FoxxTestRunError: If test fails.
         """
-        params = {'mount': mount, 'reporter': reporter}
+        params: Params = {"mount": mount, "reporter": reporter}
         if idiomatic is not None:
-            params['idiomatic'] = idiomatic
+            params["idiomatic"] = idiomatic
         if name_filter is not None:
-            params['filter'] = name_filter
+            params["filter"] = name_filter
 
         headers = {}
-        if output_format == 'x-ldjson':
-            headers['Accept'] = 'application/x-ldjson'
-        elif output_format == 'xml':
-            headers['Accept'] = 'application/xml'
-        elif output_format == 'text':
-            headers['Accept'] = 'text/plain'
+        if output_format == "x-ldjson":
+            headers["Accept"] = "application/x-ldjson"
+        elif output_format == "xml":
+            headers["Accept"] = "application/xml"
+        elif output_format == "text":
+            headers["Accept"] = "text/plain"
 
         request = Request(
-            method='post',
-            endpoint='/_api/foxx/tests',
-            params=params,
-            headers=headers
+            method="post", endpoint="/_api/foxx/tests", params=params, headers=headers
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise FoxxTestRunError(resp, request)
-            return resp.raw_body
+        def response_handler(resp: Response) -> str:
+            if resp.is_success:
+                return resp.raw_body
+            raise FoxxTestRunError(resp, request)
 
         return await self._execute(request, response_handler)

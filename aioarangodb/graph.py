@@ -1,109 +1,84 @@
-from __future__ import absolute_import, unicode_literals
+__all__ = ["Graph"]
 
-__all__ = ['Graph']
+from typing import List, Optional, Sequence, Union
 
-from .api import APIWrapper
-from .collection import EdgeCollection
-from .collection import VertexCollection
+from .api import ApiGroup
+from .collection import EdgeCollection, VertexCollection
+from .connection import Connection
 from .exceptions import (
-    EdgeDefinitionListError,
     EdgeDefinitionCreateError,
     EdgeDefinitionDeleteError,
+    EdgeDefinitionListError,
     EdgeDefinitionReplaceError,
     GraphPropertiesError,
     GraphTraverseError,
-    VertexCollectionListError,
     VertexCollectionCreateError,
     VertexCollectionDeleteError,
+    VertexCollectionListError,
 )
+from .executor import ApiExecutor
+from .formatter import format_graph_properties
 from .request import Request
+from .response import Response
+from .result import Result
+from .typings import Json, Jsons
 from .utils import get_col_name, get_doc_id
 
 
-class Graph(APIWrapper):
-    """Graph API wrapper.
+class Graph(ApiGroup):
+    """Graph API wrapper."""
 
-    :param executor: API executor.
-    :type executor: arango.executor.Executor
-    :param name: Graph name.
-    :type name: str | unicode
-    """
-
-    def __init__(self, connection, executor, name):
-        super(Graph, self).__init__(connection, executor)
+    def __init__(
+        self, connection: Connection, executor: ApiExecutor, name: str
+    ) -> None:
+        super().__init__(connection, executor)
         self._name = name
 
-    def __repr__(self):
-        return '<Graph {}>'.format(self._name)
+    def __repr__(self) -> str:
+        return f"<Graph {self._name}>"
 
-    def _get_col_by_vertex(self, vertex):
+    def _get_col_by_vertex(self, vertex: Union[str, Json]) -> VertexCollection:
         """Return the vertex collection for the given vertex document.
 
         :param vertex: Vertex document ID or body with "_id" field.
-        :type vertex: str | unicode | dict
+        :type vertex: str | dict
         :return: Vertex collection API wrapper.
         :rtype: arango.collection.VertexCollection
         """
         return self.vertex_collection(get_col_name(vertex))
 
-    def _get_col_by_edge(self, edge):
-        """Return the vertex collection for the given edge document.
+    def _get_col_by_edge(self, edge: Union[str, Json]) -> EdgeCollection:
+        """Return the edge collection for the given edge document.
 
         :param edge: Edge document ID or body with "_id" field.
-        :type edge: str | unicode | dict
+        :type edge: str | dict
         :return: Edge collection API wrapper.
         :rtype: arango.collection.EdgeCollection
         """
         return self.edge_collection(get_col_name(edge))
 
     @property
-    def name(self):
+    def name(self) -> str:
         """Return the graph name.
 
         :return: Graph name.
-        :rtype: str | unicode
+        :rtype: str
         """
         return self._name
 
-    async def properties(self):
+    async def properties(self) -> Result[Json]:
         """Return graph properties.
 
         :return: Graph properties.
         :rtype: dict
         :raise arango.exceptions.GraphPropertiesError: If retrieval fails.
         """
-        request = Request(
-            method='get',
-            endpoint='/_api/gharial/{}'.format(self._name)
-        )
+        request = Request(method="get", endpoint=f"/_api/gharial/{self._name}")
 
-        def response_handler(resp):  # pragma: no cover
-            if not resp.is_success:
-                raise GraphPropertiesError(resp, request)
-            body = resp.body['graph']
-            properties = {
-                'id': body['_id'],
-                'name': body['name'],
-                'revision': body['_rev'],
-                'orphan_collections': body['orphanCollections'],
-                'edge_definitions': [
-                    {
-                        'edge_collection': edge_definition['collection'],
-                        'from_vertex_collections': edge_definition['from'],
-                        'to_vertex_collections': edge_definition['to'],
-                    }
-                    for edge_definition in body['edgeDefinitions']
-                ]
-            }
-            if 'isSmart' in body:
-                properties['smart'] = body['isSmart']
-            if 'smartGraphAttribute' in body:
-                properties['smart_field'] = body['smartGraphAttribute']
-            if 'numberOfShards' in body:
-                properties['shard_count'] = body['numberOfShards']
-            if 'replicationFactor' in body:
-                properties['replication_factor'] = body['replicationFactor']
-            return properties
+        def response_handler(resp: Response) -> Json:
+            if resp.is_success:
+                return format_graph_properties(resp.body["graph"])
+            raise GraphPropertiesError(resp, request)
 
         return await self._execute(request, response_handler)
 
@@ -111,72 +86,82 @@ class Graph(APIWrapper):
     # Vertex Collection Management #
     ################################
 
-    async def has_vertex_collection(self, name):
+    async def has_vertex_collection(self, name: str) -> Result[bool]:
         """Check if the graph has the given vertex collection.
 
         :param name: Vertex collection name.
-        :type name: str | unicode
+        :type name: str
         :return: True if vertex collection exists, False otherwise.
         :rtype: bool
         """
-        return name in await self.vertex_collections()
-
-    async def vertex_collections(self):
-        """Return vertex collections in the graph that are not orphaned.
-
-        :return: Names of vertex collections that are not orphaned.
-        :rtype: [str | unicode]
-        :raise arango.exceptions.VertexCollectionListError: If retrieval fails.
-        """
         request = Request(
-            method='get',
-            endpoint='/_api/gharial/{}/vertex'.format(self._name),
+            method="get",
+            endpoint=f"/_api/gharial/{self._name}/vertex",
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise VertexCollectionListError(resp, request)
-            return sorted(set(resp.body['collections']))
+        def response_handler(resp: Response) -> bool:
+            if resp.is_success:
+                return name in resp.body["collections"]
+            raise VertexCollectionListError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    def vertex_collection(self, name):
+    async def vertex_collections(self) -> Result[List[str]]:
+        """Return vertex collections in the graph that are not orphaned.
+
+        :return: Names of vertex collections that are not orphaned.
+        :rtype: [str]
+        :raise arango.exceptions.VertexCollectionListError: If retrieval fails.
+        """
+        request = Request(
+            method="get",
+            endpoint=f"/_api/gharial/{self._name}/vertex",
+        )
+
+        def response_handler(resp: Response) -> List[str]:
+            if not resp.is_success:
+                raise VertexCollectionListError(resp, request)
+            return sorted(set(resp.body["collections"]))
+
+        return await self._execute(request, response_handler)
+
+    def vertex_collection(self, name: str) -> VertexCollection:
         """Return the vertex collection API wrapper.
 
         :param name: Vertex collection name.
-        :type name: str | unicode
+        :type name: str
         :return: Vertex collection API wrapper.
         :rtype: arango.collection.VertexCollection
         """
         return VertexCollection(self._conn, self._executor, self._name, name)
 
-    async def create_vertex_collection(self, name):
+    async def create_vertex_collection(self, name: str) -> Result[VertexCollection]:
         """Create a vertex collection in the graph.
 
         :param name: Vertex collection name.
-        :type name: str | unicode
+        :type name: str
         :return: Vertex collection API wrapper.
         :rtype: arango.collection.VertexCollection
         :raise arango.exceptions.VertexCollectionCreateError: If create fails.
         """
         request = Request(
-            method='post',
-            endpoint='/_api/gharial/{}/vertex'.format(self._name),
-            data={'collection': name}
+            method="post",
+            endpoint=f"/_api/gharial/{self._name}/vertex",
+            data={"collection": name},
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise VertexCollectionCreateError(resp, request)
-            return self.vertex_collection(name)
+        def response_handler(resp: Response) -> VertexCollection:
+            if resp.is_success:
+                return self.vertex_collection(name)
+            raise VertexCollectionCreateError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def delete_vertex_collection(self, name, purge=False):
+    async def delete_vertex_collection(self, name: str, purge: bool = False) -> Result[bool]:
         """Remove a vertex collection from the graph.
 
         :param name: Vertex collection name.
-        :type name: str | unicode
+        :type name: str
         :param purge: If set to True, the vertex collection is not just deleted
             from the graph but also from the database completely.
         :type purge: bool
@@ -185,15 +170,15 @@ class Graph(APIWrapper):
         :raise arango.exceptions.VertexCollectionDeleteError: If delete fails.
         """
         request = Request(
-            method='delete',
-            endpoint='/_api/gharial/{}/vertex/{}'.format(self._name, name),
-            params={'dropCollection': purge}
+            method="delete",
+            endpoint=f"/_api/gharial/{self._name}/vertex/{name}",
+            params={"dropCollection": purge},
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise VertexCollectionDeleteError(resp, request)
-            return True
+        def response_handler(resp: Response) -> bool:
+            if resp.is_success:
+                return True
+            raise VertexCollectionDeleteError(resp, request)
 
         return await self._execute(request, response_handler)
 
@@ -201,56 +186,79 @@ class Graph(APIWrapper):
     # Edge Collection Management #
     ##############################
 
-    async def has_edge_definition(self, name):
+    async def has_edge_definition(self, name: str) -> Result[bool]:
         """Check if the graph has the given edge definition.
 
         :param name: Edge collection name.
-        :type name: str | unicode
+        :type name: str
         :return: True if edge definition exists, False otherwise.
         :rtype: bool
         """
-        return any(
-            definition['edge_collection'] == name
-            for definition in await self.edge_definitions()
-        )
+        request = Request(method="get", endpoint=f"/_api/gharial/{self._name}")
 
-    async def has_edge_collection(self, name):
+        def response_handler(resp: Response) -> bool:
+            if not resp.is_success:
+                raise EdgeDefinitionListError(resp, request)
+
+            body = resp.body["graph"]
+            return any(
+                edge_definition["collection"] == name
+                for edge_definition in body["edgeDefinitions"]
+            )
+
+        return await self._execute(request, response_handler)
+
+    async def has_edge_collection(self, name: str) -> Result[bool]:
         """Check if the graph has the given edge collection.
 
         :param name: Edge collection name.
-        :type name: str | unicode
+        :type name: str
         :return: True if edge collection exists, False otherwise.
         :rtype: bool
         """
         return await self.has_edge_definition(name)
 
-    def edge_collection(self, name):
+    def edge_collection(self, name: str) -> EdgeCollection:
         """Return the edge collection API wrapper.
 
         :param name: Edge collection name.
-        :type name: str | unicode
+        :type name: str
         :return: Edge collection API wrapper.
         :rtype: arango.collection.EdgeCollection
         """
         return EdgeCollection(self._conn, self._executor, self._name, name)
 
-    async def edge_definitions(self):
+    async def edge_definitions(self) -> Result[Jsons]:
         """Return the edge definitions of the graph.
 
         :return: Edge definitions of the graph.
         :rtype: [dict]
         :raise arango.exceptions.EdgeDefinitionListError: If retrieval fails.
         """
-        try:
-            return (await self.properties())['edge_definitions']
-        except GraphPropertiesError as err:
-            raise EdgeDefinitionListError(err.response, err.request)
+        request = Request(method="get", endpoint=f"/_api/gharial/{self._name}")
+
+        def response_handler(resp: Response) -> Jsons:
+            if not resp.is_success:
+                raise EdgeDefinitionListError(resp, request)
+
+            body = resp.body["graph"]
+            return [
+                {
+                    "edge_collection": edge_definition["collection"],
+                    "from_vertex_collections": edge_definition["from"],
+                    "to_vertex_collections": edge_definition["to"],
+                }
+                for edge_definition in body["edgeDefinitions"]
+            ]
+
+        return await self._execute(request, response_handler)
 
     async def create_edge_definition(
-            self,
-            edge_collection,
-            from_vertex_collections,
-            to_vertex_collections):
+        self,
+        edge_collection: str,
+        from_vertex_collections: Sequence[str],
+        to_vertex_collections: Sequence[str],
+    ) -> Result[EdgeCollection]:
         """Create a new edge definition.
 
         An edge definition consists of an edge collection, "from" vertex
@@ -265,72 +273,72 @@ class Graph(APIWrapper):
             }
 
         :param edge_collection: Edge collection name.
-        :type edge_collection: str | unicode
+        :type edge_collection: str
         :param from_vertex_collections: Names of "from" vertex collections.
-        :type from_vertex_collections: [str | unicode]
+        :type from_vertex_collections: [str]
         :param to_vertex_collections: Names of "to" vertex collections.
-        :type to_vertex_collections: [str | unicode]
+        :type to_vertex_collections: [str]
         :return: Edge collection API wrapper.
         :rtype: arango.collection.EdgeCollection
         :raise arango.exceptions.EdgeDefinitionCreateError: If create fails.
         """
         request = Request(
-            method='post',
-            endpoint='/_api/gharial/{}/edge'.format(self._name),
+            method="post",
+            endpoint=f"/_api/gharial/{self._name}/edge",
             data={
-                'collection': edge_collection,
-                'from': from_vertex_collections,
-                'to': to_vertex_collections
-            }
+                "collection": edge_collection,
+                "from": from_vertex_collections,
+                "to": to_vertex_collections,
+            },
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise EdgeDefinitionCreateError(resp, request)
-            return self.edge_collection(edge_collection)
+        def response_handler(resp: Response) -> EdgeCollection:
+            if resp.is_success:
+                return self.edge_collection(edge_collection)
+            raise EdgeDefinitionCreateError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def replace_edge_definition(self,
-                                edge_collection,
-                                from_vertex_collections,
-                                to_vertex_collections):
+    async def replace_edge_definition(
+        self,
+        edge_collection: str,
+        from_vertex_collections: Sequence[str],
+        to_vertex_collections: Sequence[str],
+    ) -> Result[EdgeCollection]:
         """Replace an edge definition.
 
         :param edge_collection: Edge collection name.
-        :type edge_collection: str | unicode
+        :type edge_collection: str
         :param from_vertex_collections: Names of "from" vertex collections.
-        :type from_vertex_collections: [str | unicode]
+        :type from_vertex_collections: [str]
         :param to_vertex_collections: Names of "to" vertex collections.
-        :type to_vertex_collections: [str | unicode]
-        :return: True if edge definition was replaced successfully.
-        :rtype: bool
+        :type to_vertex_collections: [str]
+        :return: Edge collection API wrapper.
+        :rtype: arango.collection.EdgeCollection
         :raise arango.exceptions.EdgeDefinitionReplaceError: If replace fails.
         """
         request = Request(
-            method='put',
-            endpoint='/_api/gharial/{}/edge/{}'.format(
-                self._name, edge_collection
-            ),
+            method="put",
+            endpoint=f"/_api/gharial/{self._name}/edge/{edge_collection}",
             data={
-                'collection': edge_collection,
-                'from': from_vertex_collections,
-                'to': to_vertex_collections
-            }
+                "collection": edge_collection,
+                "from": from_vertex_collections,
+                "to": to_vertex_collections,
+            },
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise EdgeDefinitionReplaceError(resp, request)
-            return self.edge_collection(edge_collection)
+        def response_handler(resp: Response) -> EdgeCollection:
+            if resp.is_success:
+                return self.edge_collection(edge_collection)
+            raise EdgeDefinitionReplaceError(resp, request)
 
         return await self._execute(request, response_handler)
 
-    async def delete_edge_definition(self, name, purge=False):
+    async def delete_edge_definition(self, name: str, purge: bool = False) -> Result[bool]:
         """Delete an edge definition from the graph.
 
         :param name: Edge collection name.
-        :type name: str | unicode
+        :type name: str
         :param purge: If set to True, the edge definition is not just removed
             from the graph but the edge collection is also deleted completely
             from the database.
@@ -340,15 +348,15 @@ class Graph(APIWrapper):
         :raise arango.exceptions.EdgeDefinitionDeleteError: If delete fails.
         """
         request = Request(
-            method='delete',
-            endpoint='/_api/gharial/{}/edge/{}'.format(self._name, name),
-            params={'dropCollections': purge}
+            method="delete",
+            endpoint=f"/_api/gharial/{self._name}/edge/{name}",
+            params={"dropCollections": purge},
         )
 
-        def response_handler(resp):
-            if not resp.is_success:
-                raise EdgeDefinitionDeleteError(resp, request)
-            return True
+        def response_handler(resp: Response) -> bool:
+            if resp.is_success:
+                return True
+            raise EdgeDefinitionDeleteError(resp, request)
 
         return await self._execute(request, response_handler)
 
@@ -357,120 +365,123 @@ class Graph(APIWrapper):
     ###################
 
     async def traverse(
-            self,
-            start_vertex,
-            direction='outbound',
-            item_order='forward',
-            strategy=None,
-            order=None,
-            edge_uniqueness=None,
-            vertex_uniqueness=None,
-            max_iter=None,
-            min_depth=None,
-            max_depth=None,
-            init_func=None,
-            sort_func=None,
-            filter_func=None,
-            visitor_func=None,
-            expander_func=None):
+        self,
+        start_vertex: Union[str, Json],
+        direction: str = "outbound",
+        item_order: str = "forward",
+        strategy: Optional[str] = None,
+        order: Optional[str] = None,
+        edge_uniqueness: Optional[str] = None,
+        vertex_uniqueness: Optional[str] = None,
+        max_iter: Optional[int] = None,
+        min_depth: Optional[int] = None,
+        max_depth: Optional[int] = None,
+        init_func: Optional[str] = None,
+        sort_func: Optional[str] = None,
+        filter_func: Optional[str] = None,
+        visitor_func: Optional[str] = None,
+        expander_func: Optional[str] = None,
+    ) -> Result[Json]:
         """Traverse the graph and return the visited vertices and edges.
 
         :param start_vertex: Start vertex document ID or body with "_id" field.
-        :type start_vertex: str | unicode | dict
+        :type start_vertex: str | dict
         :param direction: Traversal direction. Allowed values are "outbound"
             (default), "inbound" and "any".
-        :type direction: str | unicode
+        :type direction: str
         :param item_order: Item iteration order. Allowed values are "forward"
             (default) and "backward".
-        :type item_order: str | unicode
+        :type item_order: str
         :param strategy: Traversal strategy. Allowed values are "depthfirst"
             and "breadthfirst".
-        :type strategy: str | unicode
+        :type strategy: str | None
         :param order: Traversal order. Allowed values are "preorder",
             "postorder", and "preorder-expander".
-        :type order: str | unicode
-        :param vertex_uniqueness: Uniqueness for visited vertices. Allowed
-            values are "global", "path" or "none".
-        :type vertex_uniqueness: str | unicode
+        :type order: str | None
         :param edge_uniqueness: Uniqueness for visited edges. Allowed values
             are "global", "path" or "none".
-        :type edge_uniqueness: str | unicode
-        :param min_depth: Minimum depth of the nodes to visit.
-        :type min_depth: int
-        :param max_depth: Maximum depth of the nodes to visit.
-        :type max_depth: int
+        :type edge_uniqueness: str | None
+        :param vertex_uniqueness: Uniqueness for visited vertices. Allowed
+            values are "global", "path" or "none".
+        :type vertex_uniqueness: str | None
         :param max_iter: If set, halt the traversal after the given number of
             iterations. This parameter can be used to prevent endless loops in
             cyclic graphs.
-        :type max_iter: int
+        :type max_iter: int | None
+        :param min_depth: Minimum depth of the nodes to visit.
+        :type min_depth: int | None
+        :param max_depth: Maximum depth of the nodes to visit.
+        :type max_depth: int | None
         :param init_func: Initialization function in Javascript with signature
             ``(config, result) -> void``. This function is used to initialize
             values in the result.
-        :type init_func: str | unicode
+        :type init_func: str | None
         :param sort_func: Sorting function in Javascript with signature
             ``(left, right) -> integer``, which returns ``-1`` if ``left <
             right``, ``+1`` if ``left > right`` and ``0`` if ``left == right``.
-        :type sort_func: str | unicode
+        :type sort_func: str | None
         :param filter_func: Filter function in Javascript with signature
             ``(config, vertex, path) -> mixed``, where ``mixed`` can have one
             of the following values (or an array with multiple): "exclude" (do
             not visit the vertex), "prune" (do not follow the edges of the
             vertex), or "undefined" (visit the vertex and follow its edges).
-        :type filter_func: str | unicode
+        :type filter_func: str | None
         :param visitor_func: Visitor function in Javascript with signature
             ``(config, result, vertex, path, connected) -> void``. The return
             value is ignored, ``result`` is modified by reference, and
             ``connected`` is populated only when parameter **order** is set to
             "preorder-expander".
-        :type visitor_func: str | unicode
+        :type visitor_func: str | None
         :param expander_func: Expander function in Javascript with signature
             ``(config, vertex, path) -> mixed``. The function must return an
             array of connections for ``vertex``. Each connection is an object
             with attributes "edge" and "vertex".
-        :type expander_func: str | unicode
+        :type expander_func: str | None
         :return: Visited edges and vertices.
         :rtype: dict
         :raise arango.exceptions.GraphTraverseError: If traversal fails.
         """
         if strategy is not None:
-            if strategy.lower() == 'dfs':
-                strategy = 'depthfirst'
-            elif strategy.lower() == 'bfs':
-                strategy = 'breadthfirst'
+            if strategy.lower() == "dfs":
+                strategy = "depthfirst"
+            elif strategy.lower() == "bfs":
+                strategy = "breadthfirst"
 
         uniqueness = {}
         if vertex_uniqueness is not None:
-            uniqueness['vertices'] = vertex_uniqueness
+            uniqueness["vertices"] = vertex_uniqueness
         if edge_uniqueness is not None:
-            uniqueness['edges'] = edge_uniqueness
+            uniqueness["edges"] = edge_uniqueness
 
-        data = {
-            'startVertex': get_doc_id(start_vertex),
-            'graphName': self._name,
-            'direction': direction,
-            'strategy': strategy,
-            'order': order,
-            'itemOrder': item_order,
-            'uniqueness': uniqueness or None,
-            'maxIterations': max_iter,
-            'minDepth': min_depth,
-            'maxDepth': max_depth,
-            'init': init_func,
-            'filter': filter_func,
-            'visitor': visitor_func,
-            'sort': sort_func,
-            'expander': expander_func
+        data: Json = {
+            "startVertex": get_doc_id(start_vertex),
+            "graphName": self._name,
+            "direction": direction,
+            "strategy": strategy,
+            "order": order,
+            "itemOrder": item_order,
+            "uniqueness": uniqueness or None,
+            "maxIterations": max_iter,
+            "minDepth": min_depth,
+            "maxDepth": max_depth,
+            "init": init_func,
+            "filter": filter_func,
+            "visitor": visitor_func,
+            "sort": sort_func,
+            "expander": expander_func,
         }
         request = Request(
-            method='post',
-            endpoint='/_api/traversal',
-            data={k: v for k, v in data.items() if v is not None}
+            method="post",
+            endpoint="/_api/traversal",
+            data={k: v for k, v in data.items() if v is not None},
         )
 
-        def response_handler(resp):
+        def response_handler(resp: Response) -> Json:
             if not resp.is_success:
                 raise GraphTraverseError(resp, request)
-            return resp.body['result']['visited']
+
+            result: Json = resp.body["result"]["visited"]
+            return result
 
         return await self._execute(request, response_handler)
 
@@ -478,14 +489,19 @@ class Graph(APIWrapper):
     # Vertex Management #
     #####################
 
-    async def has_vertex(self, vertex, rev=None, check_rev=True):
+    async def has_vertex(
+        self,
+        vertex: Union[str, Json],
+        rev: Optional[str] = None,
+        check_rev: bool = True,
+    ) -> Result[bool]:
         """Check if the given vertex document exists in the graph.
 
         :param vertex: Vertex document ID or body with "_id" field.
-        :type vertex: str | unicode | dict
+        :type vertex: str | dict
         :param rev: Expected document revision. Overrides the value of "_rev"
             field in **vertex** if present.
-        :type rev: str | unicode
+        :type rev: str | None
         :param check_rev: If set to True, revision of **vertex** (if given) is
             compared against the revision of target vertex document.
         :type check_rev: bool
@@ -496,14 +512,19 @@ class Graph(APIWrapper):
         """
         return await self._get_col_by_vertex(vertex).has(vertex, rev, check_rev)
 
-    async def vertex(self, vertex, rev=None, check_rev=True):
+    async def vertex(
+        self,
+        vertex: Union[str, Json],
+        rev: Optional[str] = None,
+        check_rev: bool = True,
+    ) -> Result[Optional[Json]]:
         """Return a vertex document.
 
         :param vertex: Vertex document ID or body with "_id" field.
-        :type vertex: str | unicode | dict
+        :type vertex: str | dict
         :param rev: Expected document revision. Overrides the value of "_rev"
             field in **vertex** if present.
-        :type rev: str | unicode
+        :type rev: str | None
         :param check_rev: If set to True, revision of **vertex** (if given) is
             compared against the revision of target vertex document.
         :type check_rev: bool
@@ -514,17 +535,23 @@ class Graph(APIWrapper):
         """
         return await self._get_col_by_vertex(vertex).get(vertex, rev, check_rev)
 
-    async def insert_vertex(self, collection, vertex, sync=None, silent=False):
+    async def insert_vertex(
+        self,
+        collection: str,
+        vertex: Json,
+        sync: Optional[bool] = None,
+        silent: bool = False,
+    ) -> Result[Union[bool, Json]]:
         """Insert a new vertex document.
 
         :param collection: Vertex collection name.
-        :type collection: str | unicode
+        :type collection: str
         :param vertex: New vertex document to insert. If it has "_key" or "_id"
             field, its value is used as key of the new vertex (otherwise it is
             auto-generated). Any "_rev" field is ignored.
         :type vertex: dict
         :param sync: Block until operation is synchronized to disk.
-        :type sync: bool
+        :type sync: bool | None
         :param silent: If set to True, no document metadata is returned. This
             can be used to save resources.
         :type silent: bool
@@ -536,12 +563,13 @@ class Graph(APIWrapper):
         return await self.vertex_collection(collection).insert(vertex, sync, silent)
 
     async def update_vertex(
-            self,
-            vertex,
-            check_rev=True,
-            keep_none=True,
-            sync=None,
-            silent=False):
+        self,
+        vertex: Json,
+        check_rev: bool = True,
+        keep_none: bool = True,
+        sync: Optional[bool] = None,
+        silent: bool = False,
+    ) -> Result[Union[bool, Json]]:
         """Update a vertex document.
 
         :param vertex: Partial or full vertex document with updated values. It
@@ -554,7 +582,7 @@ class Graph(APIWrapper):
             in the document. If set to False, they are removed completely.
         :type keep_none: bool
         :param sync: Block until operation is synchronized to disk.
-        :type sync: bool
+        :type sync: bool | None
         :param silent: If set to True, no document metadata is returned. This
             can be used to save resources.
         :type silent: bool
@@ -569,10 +597,16 @@ class Graph(APIWrapper):
             check_rev=check_rev,
             keep_none=keep_none,
             sync=sync,
-            silent=silent
+            silent=silent,
         )
 
-    async def replace_vertex(self, vertex, check_rev=True, sync=None, silent=False):
+    async def replace_vertex(
+        self,
+        vertex: Json,
+        check_rev: bool = True,
+        sync: Optional[bool] = None,
+        silent: bool = False,
+    ) -> Result[Union[bool, Json]]:
         """Replace a vertex document.
 
         :param vertex: New vertex document to replace the old one with. It must
@@ -582,7 +616,7 @@ class Graph(APIWrapper):
             compared against the revision of target vertex document.
         :type check_rev: bool
         :param sync: Block until operation is synchronized to disk.
-        :type sync: bool
+        :type sync: bool | None
         :param silent: If set to True, no document metadata is returned. This
             can be used to save resources.
         :type silent: bool
@@ -593,26 +627,24 @@ class Graph(APIWrapper):
         :raise arango.exceptions.DocumentRevisionError: If revisions mismatch.
         """
         return await self._get_col_by_vertex(vertex).replace(
-            vertex=vertex,
-            check_rev=check_rev,
-            sync=sync,
-            silent=silent
+            vertex=vertex, check_rev=check_rev, sync=sync, silent=silent
         )
 
     async def delete_vertex(
-            self,
-            vertex,
-            rev=None,
-            check_rev=True,
-            ignore_missing=False,
-            sync=None):
+        self,
+        vertex: Json,
+        rev: Optional[str] = None,
+        check_rev: bool = True,
+        ignore_missing: bool = False,
+        sync: Optional[bool] = None,
+    ) -> Result[Union[bool, Json]]:
         """Delete a vertex document.
 
         :param vertex: Vertex document ID or body with "_id" field.
-        :type vertex: str | unicode | dict
+        :type vertex: str | dict
         :param rev: Expected document revision. Overrides the value of "_rev"
             field in **vertex** if present.
-        :type rev: str | unicode
+        :type rev: str | None
         :param check_rev: If set to True, revision of **vertex** (if given) is
             compared against the revision of target vertex document.
         :type check_rev: bool
@@ -621,7 +653,7 @@ class Graph(APIWrapper):
             always raised on failures.
         :type ignore_missing: bool
         :param sync: Block until operation is synchronized to disk.
-        :type sync: bool
+        :type sync: bool | None
         :return: True if vertex was deleted successfully, False if vertex was
             not found and **ignore_missing** was set to True (does not apply in
             transactions).
@@ -634,21 +666,23 @@ class Graph(APIWrapper):
             rev=rev,
             check_rev=check_rev,
             ignore_missing=ignore_missing,
-            sync=sync
+            sync=sync,
         )
 
     ###################
     # Edge Management #
     ###################
 
-    async def has_edge(self, edge, rev=None, check_rev=True):
+    async def has_edge(
+        self, edge: Union[str, Json], rev: Optional[str] = None, check_rev: bool = True
+    ) -> Result[bool]:
         """Check if the given edge document exists in the graph.
 
         :param edge: Edge document ID or body with "_id" field.
-        :type edge: str | unicode | dict
+        :type edge: str | dict
         :param rev: Expected document revision. Overrides the value of "_rev"
             field in **edge** if present.
-        :type rev: str | unicode
+        :type rev: str | None
         :param check_rev: If set to True, revision of **edge** (if given) is
             compared against the revision of target edge document.
         :type check_rev: bool
@@ -659,14 +693,16 @@ class Graph(APIWrapper):
         """
         return await self._get_col_by_edge(edge).has(edge, rev, check_rev)
 
-    async def edge(self, edge, rev=None, check_rev=True):
+    async def edge(
+        self, edge: Union[str, Json], rev: Optional[str] = None, check_rev: bool = True
+    ) -> Result[Optional[Json]]:
         """Return an edge document.
 
         :param edge: Edge document ID or body with "_id" field.
-        :type edge: str | unicode | dict
+        :type edge: str | dict
         :param rev: Expected document revision. Overrides the value of "_rev"
             field in **edge** if present.
-        :type rev: str | unicode
+        :type rev: str | None
         :param check_rev: If set to True, revision of **edge** (if given) is
             compared against the revision of target edge document.
         :type check_rev: bool
@@ -677,18 +713,24 @@ class Graph(APIWrapper):
         """
         return await self._get_col_by_edge(edge).get(edge, rev, check_rev)
 
-    async def insert_edge(self, collection, edge, sync=None, silent=False):
+    async def insert_edge(
+        self,
+        collection: str,
+        edge: Json,
+        sync: Optional[bool] = None,
+        silent: bool = False,
+    ) -> Result[Union[bool, Json]]:
         """Insert a new edge document.
 
         :param collection: Edge collection name.
-        :type collection: str | unicode
+        :type collection: str
         :param edge: New edge document to insert. It must contain "_from" and
             "_to" fields. If it has "_key" or "_id" field, its value is used
             as key of the new edge document (otherwise it is auto-generated).
             Any "_rev" field is ignored.
         :type edge: dict
         :param sync: Block until operation is synchronized to disk.
-        :type sync: bool
+        :type sync: bool | None
         :param silent: If set to True, no document metadata is returned. This
             can be used to save resources.
         :type silent: bool
@@ -700,12 +742,13 @@ class Graph(APIWrapper):
         return await self.edge_collection(collection).insert(edge, sync, silent)
 
     async def update_edge(
-            self,
-            edge,
-            check_rev=True,
-            keep_none=True,
-            sync=None,
-            silent=False):
+        self,
+        edge: Json,
+        check_rev: bool = True,
+        keep_none: bool = True,
+        sync: Optional[bool] = None,
+        silent: bool = False,
+    ) -> Result[Union[bool, Json]]:
         """Update an edge document.
 
         :param edge: Partial or full edge document with updated values. It must
@@ -716,9 +759,9 @@ class Graph(APIWrapper):
         :type check_rev: bool
         :param keep_none: If set to True, fields with value None are retained
             in the document. If set to False, they are removed completely.
-        :type keep_none: bool
+        :type keep_none: bool | None
         :param sync: Block until operation is synchronized to disk.
-        :type sync: bool
+        :type sync: bool | None
         :param silent: If set to True, no document metadata is returned. This
             can be used to save resources.
         :type silent: bool
@@ -733,10 +776,16 @@ class Graph(APIWrapper):
             check_rev=check_rev,
             keep_none=keep_none,
             sync=sync,
-            silent=silent
+            silent=silent,
         )
 
-    async def replace_edge(self, edge, check_rev=True, sync=None, silent=False):
+    async def replace_edge(
+        self,
+        edge: Json,
+        check_rev: bool = True,
+        sync: Optional[bool] = None,
+        silent: bool = False,
+    ) -> Result[Union[bool, Json]]:
         """Replace an edge document.
 
         :param edge: New edge document to replace the old one with. It must
@@ -747,7 +796,7 @@ class Graph(APIWrapper):
             compared against the revision of target edge document.
         :type check_rev: bool
         :param sync: Block until operation is synchronized to disk.
-        :type sync: bool
+        :type sync: bool | None
         :param silent: If set to True, no document metadata is returned. This
             can be used to save resources.
         :type silent: bool
@@ -758,26 +807,24 @@ class Graph(APIWrapper):
         :raise arango.exceptions.DocumentRevisionError: If revisions mismatch.
         """
         return await self._get_col_by_edge(edge).replace(
-            edge=edge,
-            check_rev=check_rev,
-            sync=sync,
-            silent=silent
+            edge=edge, check_rev=check_rev, sync=sync, silent=silent
         )
 
     async def delete_edge(
-            self,
-            edge,
-            rev=None,
-            check_rev=True,
-            ignore_missing=False,
-            sync=None):
+        self,
+        edge: Union[str, Json],
+        rev: Optional[str] = None,
+        check_rev: bool = True,
+        ignore_missing: bool = False,
+        sync: Optional[bool] = None,
+    ) -> Result[Union[bool, Json]]:
         """Delete an edge document.
 
         :param edge: Edge document ID or body with "_id" field.
-        :type edge: str | unicode | dict
+        :type edge: str | dict
         :param rev: Expected document revision. Overrides the value of "_rev"
             field in **edge** if present.
-        :type rev: str | unicode
+        :type rev: str | None
         :param check_rev: If set to True, revision of **edge** (if given) is
             compared against the revision of target edge document.
         :type check_rev: bool
@@ -786,7 +833,7 @@ class Graph(APIWrapper):
             always raised on failures.
         :type ignore_missing: bool
         :param sync: Block until operation is synchronized to disk.
-        :type sync: bool
+        :type sync: bool | None
         :return: True if edge was deleted successfully, False if edge was not
             found and **ignore_missing** was set to True (does not  apply in
             transactions).
@@ -799,31 +846,32 @@ class Graph(APIWrapper):
             rev=rev,
             check_rev=check_rev,
             ignore_missing=ignore_missing,
-            sync=sync
+            sync=sync,
         )
 
     async def link(
-            self,
-            collection,
-            from_vertex,
-            to_vertex,
-            data=None,
-            sync=None,
-            silent=False):
+        self,
+        collection: str,
+        from_vertex: Union[str, Json],
+        to_vertex: Union[str, Json],
+        data: Optional[Json] = None,
+        sync: Optional[bool] = None,
+        silent: bool = False,
+    ) -> Result[Union[bool, Json]]:
         """Insert a new edge document linking the given vertices.
 
         :param collection: Edge collection name.
-        :type collection: str | unicode
+        :type collection: str
         :param from_vertex: "From" vertex document ID or body with "_id" field.
-        :type from_vertex: str | unicode | dict
+        :type from_vertex: str | dict
         :param to_vertex: "To" vertex document ID or body with "_id" field.
-        :type to_vertex: str | unicode | dict
+        :type to_vertex: str | dict
         :param data: Any extra data for the new edge document. If it has "_key"
             or "_id" field, its value is used as key of the new edge document
             (otherwise it is auto-generated).
         :type data: dict
         :param sync: Block until operation is synchronized to disk.
-        :type sync: bool
+        :type sync: bool | None
         :param silent: If set to True, no document metadata is returned. This
             can be used to save resources.
         :type silent: bool
@@ -837,19 +885,21 @@ class Graph(APIWrapper):
             to_vertex=to_vertex,
             data=data,
             sync=sync,
-            silent=silent
+            silent=silent,
         )
 
-    async def edges(self, collection, vertex, direction=None):
+    async def edges(
+        self, collection: str, vertex: Union[str, Json], direction: Optional[str] = None
+    ) -> Result[Json]:
         """Return the edge documents coming in and/or out of given vertex.
 
         :param collection: Edge collection name.
-        :type collection: str | unicode
+        :type collection: str
         :param vertex: Vertex document ID or body with "_id" field.
-        :type vertex: str | unicode | dict
+        :type vertex: str | dict
         :param direction: The direction of the edges. Allowed values are "in"
             and "out". If not set, edges in both directions are returned.
-        :type direction: str | unicode
+        :type direction: str
         :return: List of edges and statistics.
         :rtype: dict
         :raise arango.exceptions.EdgeListError: If retrieval fails.

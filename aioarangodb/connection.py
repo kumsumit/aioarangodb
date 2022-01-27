@@ -1,96 +1,95 @@
-from __future__ import absolute_import, unicode_literals
-
-from abc import ABCMeta, abstractmethod
-from calendar import timegm
-from datetime import datetime
-
-import jwt
-from six import string_types
-from aiohttp import MultipartWriter
-
-from .exceptions import (
-    ServerConnectionError,
-    JWTAuthError,
-)
-from .request import Request
-from .response import Response
-
 __all__ = [
-    'Connection',
-    'BasicConnection',
-    'JWTConnection',
-    'JWTSuperuserConnection'
+    "BaseConnection",
+    "BasicConnection",
+    "Connection",
+    "JwtConnection",
+    "JwtSuperuserConnection",
 ]
 
+import logging
+import sys
+import time
+from abc import abstractmethod
+from typing import Any, Callable, Optional, Sequence, Set, Tuple, Union
 
-class Connection(object):
-    """Base connection to specific ArangoDB database.
+import jwt
+from requests import ConnectionError, Session
+from requests_toolbelt import MultipartEncoder
 
-    :param hosts: Host URL or list of URLs (coordinators in a cluster).
-    :type hosts: [str | unicode]
-    :param host_resolver: Host resolver (used for clusters).
-    :type host_resolver: arango.resolver.HostResolver
-    :param sessions: HTTP session objects per host.
-    :type sessions: [requests.Session]
-    :param db_name: Database name.
-    :type db_name: str | unicode
-    :param http_client: User-defined HTTP client.
-    :type http_client: arango.http.HTTPClient
-    """
+from .exceptions import JWTAuthError, ServerConnectionError
+from .http import HTTPClient
+from .request import Request
+from .resolver import HostResolver
+from .response import Response
+from .typings import Fields, Json
 
-    __metaclass__ = ABCMeta
+Connection = Union["BasicConnection", "JwtConnection", "JwtSuperuserConnection"]
 
-    auth_required_header = 'WWW-Authenticate'
 
-    def __init__(self,
-                 hosts,
-                 host_resolver,
-                 sessions,
-                 db_name,
-                 http_client,
-                 serializer,
-                 deserializer):
-        self._url_prefixes = ['{}/_db/{}'.format(h, db_name) for h in hosts]
+class BaseConnection:
+    """Base connection to a specific ArangoDB database."""
+
+    def __init__(
+        self,
+        hosts: Fields,
+        host_resolver: HostResolver,
+        sessions: Sequence[Session],
+        db_name: str,
+        http_client: HTTPClient,
+        serializer: Callable[..., str],
+        deserializer: Callable[[str], Any],
+    ) -> None:
+        self._url_prefixes = [f"{host}/_db/{db_name}" for host in hosts]
         self._host_resolver = host_resolver
         self._sessions = sessions
         self._db_name = db_name
         self._http = http_client
         self._serializer = serializer
         self._deserializer = deserializer
+        self._username: Optional[str] = None
 
     @property
-    def db_name(self):
+    def db_name(self) -> str:
         """Return the database name.
 
         :returns: Database name.
-        :rtype: str | unicode
+        :rtype: str
         """
         return self._db_name
 
-    def serialize(self, obj):
-        """Serialize the object and return the string.
+    @property
+    def username(self) -> Optional[str]:
+        """Return the username.
 
-        :param obj: Object to serialize.
-        :type obj: str | unicode | bool | int | list | dict
+        :returns: Username.
+        :rtype: str
+        """
+        return self._username
+
+    def serialize(self, obj: Any) -> str:
+        """Serialize the given object.
+
+        :param obj: JSON object to serialize.
+        :type obj: str | bool | int | float | list | dict | None
         :return: Serialized string.
-        :rtype: str | unicode
+        :rtype: str
         """
         return self._serializer(obj)
 
-    def deserialize(self, string):
+    def deserialize(self, string: str) -> Any:
         """De-serialize the string and return the object.
 
         :param string: String to de-serialize.
-        :type string: str | unicode
-        :return: De-serialized object.
-        :rtype: str | unicode | bool | int | list | dict
+        :type string: str
+        :return: De-serialized JSON object.
+        :rtype: str | bool | int | float | list | dict | None
         """
         try:
             return self._deserializer(string)
         except (ValueError, TypeError):
             return string
 
-    def prep_response(self, resp, deserialize=True):
+    def prep_response(self, resp: Response, deserialize: bool = True) -> Response:
         """Populate the response with details and return it.
 
         :param deserialize: Deserialize the response body.
@@ -103,8 +102,10 @@ class Connection(object):
         if deserialize:
             resp.body = self.deserialize(resp.raw_body)
             if isinstance(resp.body, dict):
-                resp.error_code = resp.body.get('errorNum')
-                resp.error_message = resp.body.get('errorMessage')
+                resp.error_code = resp.body.get("errorNum")
+                resp.error_message = resp.body.get("errorMessage")
+                if resp.status_code == resp.error_code == 503:
+                    raise ConnectionError  # Fallback to another host
         else:
             resp.body = resp.raw_body
 
@@ -112,7 +113,51 @@ class Connection(object):
         resp.is_success = http_ok and resp.error_code is None
         return resp
 
-    def prep_bulk_err_response(self, parent_response, body):
+    async def process_request(
+        self, host_index: int, request: Request, auth: Optional[Tuple[str, str]] = None
+    ) -> Response:
+        """Execute a request until a valid response has been returned.
+
+        :param host_index: The index of the first host to try
+        :type host_index: int
+        :param request: HTTP request.
+        :type request: arango.request.Request
+        :param auth: (UserName, Password)
+        :type auth: Optional[Tuple[str, str]]
+        :return: HTTP response.
+        :rtype: arango.response.Response
+        """
+        tries = 0
+        indexes_to_filter: Set[int] = set()
+        while tries < self._host_resolver.max_tries:
+            try:
+                resp = await self._http.send_request(
+                    session=self._sessions[host_index],
+                    method=request.method,
+                    url=self._url_prefixes[host_index] + request.endpoint,
+                    params=request.params,
+                    data=self.normalize_data(request.data),
+                    headers=request.headers,
+                    auth=auth,
+                )
+
+                return self.prep_response(resp, request.deserialize)
+            except ConnectionError:
+                url = self._url_prefixes[host_index] + request.endpoint
+                logging.debug(f"ConnectionError: {url}")
+
+                if len(indexes_to_filter) == self._host_resolver.host_count - 1:
+                    indexes_to_filter.clear()
+                indexes_to_filter.add(host_index)
+
+                host_index = self._host_resolver.get_host_index(indexes_to_filter)
+                tries += 1
+
+        raise ConnectionAbortedError(
+            f"Can't connect to host(s) within limit ({self._host_resolver.max_tries})"
+        )
+
+    def prep_bulk_err_response(self, parent_response: Response, body: Json) -> Response:
         """Build and return a bulk error response.
 
         :param parent_response: Parent response.
@@ -131,46 +176,42 @@ class Connection(object):
             raw_body=self.serialize(body),
         )
         resp.body = body
-        resp.error_code = body['errorNum']
-        resp.error_message = body['errorMessage']
+        resp.error_code = body["errorNum"]
+        resp.error_message = body["errorMessage"]
         resp.is_success = False
         return resp
 
-    def get_normalized_data(self, request):
+    def normalize_data(self, data: Any) -> Union[str, MultipartEncoder, None]:
         """Normalize request data.
 
-        :param request: HTTP request.
-        :type request: arango.request.Request
+        :param data: Request data.
+        :type data: str | MultipartEncoder | None
         :return: Normalized data.
-        :rtype: str | unicode | bool | int | list | dict
+        :rtype: str | MultipartEncoder | None
         """
-        if request.data is None:
-            return request.data
-        elif isinstance(request.data, (string_types, MultipartWriter)):
-            return request.data
+        if data is None:
+            return None
+        elif isinstance(data, (str, MultipartEncoder)):
+            return data
         else:
-            return self.serialize(request.data)
+            return self.serialize(data)
 
-    async def ping(self):
+    async def ping(self) -> int:
         """Ping the next host to check if connection is established.
 
         :return: Response status code.
         :rtype: int
         """
-        request = Request(
-            method='get',
-            endpoint='/_api/collection'
-        )
+        request = Request(method="get", endpoint="/_api/collection")
         resp = await self.send_request(request)
         if resp.status_code in {401, 403}:
-            raise ServerConnectionError('bad username and/or password')
+            raise ServerConnectionError("bad username and/or password")
         if not resp.is_success:  # pragma: no cover
-            raise ServerConnectionError(
-                resp.error_message or 'bad server response')
+            raise ServerConnectionError(resp.error_message or "bad server response")
         return resp.status_code
 
     @abstractmethod
-    async def send_request(self, request):  # pragma: no cover
+    async def send_request(self, request: Request) -> Response:  # pragma: no cover
         """Send an HTTP request to ArangoDB server.
 
         :param request: HTTP request.
@@ -181,57 +222,50 @@ class Connection(object):
         raise NotImplementedError
 
 
-class BasicConnection(Connection):
+class BasicConnection(BaseConnection):
     """Connection to specific ArangoDB database using basic authentication.
 
     :param hosts: Host URL or list of URLs (coordinators in a cluster).
-    :type hosts: [str | unicode]
+    :type hosts: [str]
     :param host_resolver: Host resolver (used for clusters).
     :type host_resolver: arango.resolver.HostResolver
     :param sessions: HTTP session objects per host.
     :type sessions: [requests.Session]
     :param db_name: Database name.
-    :type db_name: str | unicode
+    :type db_name: str
     :param username: Username.
-    :type username: str | unicode
+    :type username: str
     :param password: Password.
-    :type password: str | unicode
+    :type password: str
     :param http_client: User-defined HTTP client.
     :type http_client: arango.http.HTTPClient
     """
 
-    def __init__(self,
-                 hosts,
-                 host_resolver,
-                 sessions,
-                 db_name,
-                 username,
-                 password,
-                 http_client,
-                 serializer,
-                 deserializer):
-        super(BasicConnection, self).__init__(
+    def __init__(
+        self,
+        hosts: Fields,
+        host_resolver: HostResolver,
+        sessions: Sequence[Session],
+        db_name: str,
+        username: str,
+        password: str,
+        http_client: HTTPClient,
+        serializer: Callable[..., str],
+        deserializer: Callable[[str], Any],
+    ) -> None:
+        super().__init__(
             hosts,
             host_resolver,
             sessions,
             db_name,
             http_client,
             serializer,
-            deserializer
+            deserializer,
         )
         self._username = username
         self._auth = (username, password)
 
-    @property
-    def username(self):
-        """Return the username.
-
-        :returns: Username.
-        :rtype: str | unicode
-        """
-        return self._username
-
-    async def send_request(self, request):
+    async def send_request(self, request: Request) -> Response:
         """Send an HTTP request to ArangoDB server.
 
         :param request: HTTP request.
@@ -240,65 +274,60 @@ class BasicConnection(Connection):
         :rtype: arango.response.Response
         """
         host_index = self._host_resolver.get_host_index()
-        resp = await self._http.send_request(
-            session=self._sessions[host_index],
-            method=request.method,
-            url=self._url_prefixes[host_index] + request.endpoint,
-            params=request.params,
-            data=self.get_normalized_data(request),
-            headers=request.headers,
-            auth=self._auth
-        )
-        return self.prep_response(resp, request.deserialize)
+        return await self.process_request(host_index, request, auth=self._auth)
 
 
-class JWTConnection(Connection):
+class JwtConnection(BaseConnection):
     """Connection to specific ArangoDB database using JWT authentication.
 
     :param hosts: Host URL or list of URLs (coordinators in a cluster).
-    :type hosts: [str | unicode]
+    :type hosts: [str]
     :param host_resolver: Host resolver (used for clusters).
     :type host_resolver: arango.resolver.HostResolver
     :param sessions: HTTP session objects per host.
     :type sessions: [requests.Session]
     :param db_name: Database name.
-    :type db_name: str | unicode
+    :type db_name: str
     :param username: Username.
-    :type username: str | unicode
+    :type username: str
     :param password: Password.
-    :type password: str | unicode
+    :type password: str
     :param http_client: User-defined HTTP client.
     :type http_client: arango.http.HTTPClient
     """
 
-    def __init__(self,
-                 hosts,
-                 host_resolver,
-                 sessions,
-                 db_name,
-                 username,
-                 password,
-                 http_client,
-                 serializer,
-                 deserializer):
-        super(JWTConnection, self).__init__(
+    def __init__(
+        self,
+        hosts: Fields,
+        host_resolver: HostResolver,
+        sessions: Sequence[Session],
+        db_name: str,
+        username: str,
+        password: str,
+        http_client: HTTPClient,
+        serializer: Callable[..., str],
+        deserializer: Callable[[str], Any],
+    ) -> None:
+        super().__init__(
             hosts,
             host_resolver,
             sessions,
             db_name,
             http_client,
             serializer,
-            deserializer
+            deserializer,
         )
         self._username = username
         self._password = password
-        self.exp_leeway = 0
 
-        self._auth_header = None
-        self._token = None
-        self._token_exp = None
+        self.exp_leeway: int = 0
+        self._auth_header: Optional[str] = None
+        self._token: Optional[str] = None
+        self._token_exp: int = sys.maxsize
 
-    async def send_request(self, request):
+        self.refresh_token()
+
+    async def send_request(self, request: Request) -> Response:
         """Send an HTTP request to ArangoDB server.
 
         :param request: HTTP request.
@@ -307,119 +336,105 @@ class JWTConnection(Connection):
         :rtype: arango.response.Response
         """
         host_index = self._host_resolver.get_host_index()
-        request.headers['Authorization'] = self._auth_header
 
-        resp = await self._http.send_request(
-            session=self._sessions[host_index],
-            method=request.method,
-            url=self._url_prefixes[host_index] + request.endpoint,
-            params=request.params,
-            data=self.get_normalized_data(request),
-            headers=request.headers,
-        )
-        resp = self.prep_response(resp, request.deserialize)
+        if self._auth_header is not None:
+            request.headers["Authorization"] = self._auth_header
+
+        resp = await self.process_request(host_index, request)
 
         # Refresh the token and retry on HTTP 401 and error code 11.
         if resp.error_code != 11 or resp.status_code != 401:
             return resp
 
-        now = timegm(datetime.utcnow().utctimetuple())
+        now = int(time.time())
         if self._token_exp < now - self.exp_leeway:  # pragma: no cover
             return resp
 
         await self.refresh_token()
-        request.headers['Authorization'] = self._auth_header
 
-        resp = await self._http.send_request(
-            session=self._sessions[host_index],
-            method=request.method,
-            url=self._url_prefixes[host_index] + request.endpoint,
-            params=request.params,
-            data=self.get_normalized_data(request),
-            headers=request.headers,
-        )
-        return self.prep_response(resp, request.deserialize)
+        if self._auth_header is not None:
+            request.headers["Authorization"] = self._auth_header
 
-    async def refresh_token(self):
+        return await self.process_request(host_index, request)
+
+    async def refresh_token(self) -> None:
         """Get a new JWT token for the current user (cannot be a superuser).
 
         :return: JWT token.
-        :rtype: str | unicode
+        :rtype: str
         """
         request = Request(
-            method='post',
-            endpoint='/_open/auth',
-            data={
-                'username': self._username,
-                'password': self._password
-            }
+            method="post",
+            endpoint="/_open/auth",
+            data={"username": self._username, "password": self._password},
         )
+
         host_index = self._host_resolver.get_host_index()
-        resp = await self._http.send_request(
-            session=self._sessions[host_index],
-            method=request.method,
-            url=self._url_prefixes[host_index] + request.endpoint,
-            data=self.get_normalized_data(request)
-        )
-        resp = self.prep_response(resp)
+
+        resp = await self.process_request(host_index, request)
+
         if not resp.is_success:
             raise JWTAuthError(resp, request)
 
-        self._token = resp.body['jwt']
+        self._token = resp.body["jwt"]
+        assert self._token is not None
+
         jwt_payload = jwt.decode(
             self._token,
-            issuer='arangodb',
-            algorithms=['HS256'],
+            issuer="arangodb",
+            algorithms=["HS256"],
             options={
-                'require_exp': True,
-                'require_iat': True,
-                'verify_iat': True,
-                'verify_exp': True,
-                'verify_signature': False
+                "require_exp": True,
+                "require_iat": True,
+                "verify_iat": True,
+                "verify_exp": True,
+                "verify_signature": False,
             },
         )
-        self._token_exp = jwt_payload['exp']
-        self._auth_header = 'bearer {}'.format(self._token)
+        self._token_exp = jwt_payload["exp"]
+        self._auth_header = f"bearer {self._token}"
 
 
-class JWTSuperuserConnection(Connection):
+class JwtSuperuserConnection(BaseConnection):
     """Connection to specific ArangoDB database using superuser JWT.
 
     :param hosts: Host URL or list of URLs (coordinators in a cluster).
-    :type hosts: [str | unicode]
+    :type hosts: [str]
     :param host_resolver: Host resolver (used for clusters).
     :type host_resolver: arango.resolver.HostResolver
     :param sessions: HTTP session objects per host.
     :type sessions: [requests.Session]
     :param db_name: Database name.
-    :type db_name: str | unicode
+    :type db_name: str
     :param http_client: User-defined HTTP client.
     :type http_client: arango.http.HTTPClient
     :param superuser_token: User generated token for superuser access.
-    :type superuser_token: str | unicode
+    :type superuser_token: str
     """
 
-    def __init__(self,
-                 hosts,
-                 host_resolver,
-                 sessions,
-                 db_name,
-                 http_client,
-                 serializer,
-                 deserializer,
-                 superuser_token):
-        super(JWTSuperuserConnection, self).__init__(
+    def __init__(
+        self,
+        hosts: Fields,
+        host_resolver: HostResolver,
+        sessions: Sequence[Session],
+        db_name: str,
+        http_client: HTTPClient,
+        serializer: Callable[..., str],
+        deserializer: Callable[[str], Any],
+        superuser_token: str,
+    ) -> None:
+        super().__init__(
             hosts,
             host_resolver,
             sessions,
             db_name,
             http_client,
             serializer,
-            deserializer
+            deserializer,
         )
-        self._auth_header = 'bearer {}'.format(superuser_token)
+        self._auth_header = f"bearer {superuser_token}"
 
-    async def send_request(self, request):
+    async def send_request(self, request: Request) -> Response:
         """Send an HTTP request to ArangoDB server.
 
         :param request: HTTP request.
@@ -428,14 +443,6 @@ class JWTSuperuserConnection(Connection):
         :rtype: arango.response.Response
         """
         host_index = self._host_resolver.get_host_index()
-        request.headers['Authorization'] = self._auth_header
+        request.headers["Authorization"] = self._auth_header
 
-        resp = await self._http.send_request(
-            session=self._sessions[host_index],
-            method=request.method,
-            url=self._url_prefixes[host_index] + request.endpoint,
-            params=request.params,
-            data=self.get_normalized_data(request),
-            headers=request.headers,
-        )
-        return self.prep_response(resp, request.deserialize)
+        return await self.process_request(host_index, request)

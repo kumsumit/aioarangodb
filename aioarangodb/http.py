@@ -1,12 +1,13 @@
-from __future__ import absolute_import, unicode_literals
-
 __all__ = ['HTTPClient', 'DefaultHTTPClient']
 
 from abc import ABCMeta, abstractmethod
+from typing import MutableMapping, Optional, Tuple, Union
 
 import aiohttp
-
+from aiohttp import MultipartWriter, ClientSession
+from aiohttp_retry import RetryClient, ExponentialRetry
 from .response import Response
+from .typings import Headers
 
 
 class HTTPClient(object):  # pragma: no cover
@@ -30,13 +31,14 @@ class HTTPClient(object):  # pragma: no cover
     @abstractmethod
     async def send_request(
             self,
-            session,
-            method,
-            url,
-            headers=None,
-            params=None,
-            data=None,
-            auth=None):
+            session: ClientSession,
+            method: str,
+            url: str,
+            headers: Optional[Headers] = None,
+            params: Optional[MutableMapping[str, str]] = None,
+            data: Union[str, MultipartWriter, None] = None,
+            auth: Optional[Tuple[str, str]] = None,
+    ) -> Response:
         """Send an HTTP request.
 
         This method must be overridden by the user.
@@ -64,7 +66,11 @@ class HTTPClient(object):  # pragma: no cover
 class DefaultHTTPClient(HTTPClient):
     """Default HTTP client implementation."""
 
-    def create_session(self, host):
+    REQUEST_TIMEOUT = 60
+    RETRY_ATTEMPTS = 3
+    BACKOFF_FACTOR = 1
+
+    def create_session(self, host: str):
         """Create and return a new session/connection.
 
         :param host: ArangoDB host URL.
@@ -72,17 +78,19 @@ class DefaultHTTPClient(HTTPClient):
         :returns: requests session object
         :rtype: requests.Session
         """
-        return aiohttp.ClientSession()
+        retry_options = ExponentialRetry(attempts=3, statuses={429, 500, 502, 503, 504})
+        return RetryClient(raise_for_status=False, retry_options=retry_options)
 
     async def send_request(
             self,
-            session,
-            method,
-            url,
-            params=None,
-            data=None,
-            headers=None,
-            auth=None):
+            session: ClientSession,
+            method: str,
+            url: str,
+            headers: Optional[Headers] = None,
+            params: Optional[MutableMapping[str, str]] = None,
+            data: Union[str, MultipartWriter, None] = None,
+            auth: Optional[Tuple[str, str]] = None,
+    ) -> Response:
         """Send an HTTP request.
 
         :param session: Requests session object.

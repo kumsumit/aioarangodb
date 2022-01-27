@@ -1,25 +1,29 @@
-from __future__ import absolute_import, unicode_literals
+from typing import Optional
+
+from .request import Request
+from .response import Response
 
 
 class ArangoError(Exception):
-    """Base class for all exceptions in aioarangodb."""
+    """Base class for all exceptions in python-arango."""
 
 
 class ArangoClientError(ArangoError):
-    """Base class for errors originating from aioarangodb client.
+    """Base class for errors originating from python-arango client.
 
     :param msg: Error message.
-    :type msg: str | unicode
+    :type msg: str
 
     :cvar source: Source of the error (always set to "client").
-    :vartype source: str | unicode
+    :vartype source: str
     :ivar message: Error message.
-    :vartype message: str | unicode
+    :vartype message: str
     """
-    source = 'client'
 
-    def __init__(self, msg):
-        super(ArangoClientError, self).__init__(msg)
+    source = "client"
+
+    def __init__(self, msg: str) -> None:
+        super().__init__(msg)
         self.message = msg
         self.error_message = None
         self.error_code = None
@@ -37,42 +41,44 @@ class ArangoServerError(ArangoError):
     :param resp: HTTP response.
     :type resp: arango.response.Response
     :param msg: Error message override.
-    :type msg: str | unicode
+    :type msg: str
 
     :cvar source: Source of the error (always set to "server").
-    :vartype source: str | unicode
+    :vartype source: str
     :ivar message: Exception message.
-    :vartype message: str | unicode
+    :vartype message: str
     :ivar url: API URL.
-    :vartype url: str | unicode
+    :vartype url: str
     :ivar response: HTTP response object.
     :vartype response: arango.response.Response
     :ivar request: HTTP request object.
     :vartype request: arango.request.Request
     :ivar http_method: HTTP method in lowercase (e.g. "post").
-    :vartype http_method: str | unicode
+    :vartype http_method: str
     :ivar http_code: HTTP status code.
     :vartype http_code: int
     :ivar http_headers: Response headers.
-    :vartype http_headers: requests.structures.CaseInsensitiveDict | dict
+    :vartype http_headers: dict
     :ivar error_code: Error code from ArangoDB server.
     :vartype error_code: int
     :ivar error_message: Raw error message from ArangoDB server.
-    :vartype error_message: str | unicode
+    :vartype error_message: str
     """
-    source = 'server'
 
-    def __init__(self, resp, request, msg=None):
+    source = "server"
+
+    def __init__(
+        self, resp: Response, request: Request, msg: Optional[str] = None
+    ) -> None:
         msg = msg or resp.error_message or resp.status_text
         self.error_message = resp.error_message
         self.error_code = resp.error_code
         if self.error_code is not None:
-            msg = '[HTTP {}][ERR {}] {}'.format(
-                resp.status_code, self.error_code, msg)
+            msg = f"[HTTP {resp.status_code}][ERR {self.error_code}] {msg}"
         else:
-            msg = '[HTTP {}] {}'.format(resp.status_code, msg)
+            msg = f"[HTTP {resp.status_code}] {msg}"
             self.error_code = resp.status_code
-        super(ArangoServerError, self).__init__(msg)
+        super().__init__(msg)
         self.message = msg
         self.url = resp.url
         self.response = resp
@@ -80,6 +86,7 @@ class ArangoServerError(ArangoError):
         self.http_method = resp.method
         self.http_code = resp.status_code
         self.http_headers = resp.headers
+
 
 ##################
 # AQL Exceptions #
@@ -176,6 +183,35 @@ class AsyncJobClearError(ArangoServerError):
 
 
 ##############################
+# Backup Exceptions #
+##############################
+
+
+class BackupCreateError(ArangoServerError):
+    """Failed to create a backup."""
+
+
+class BackupDeleteError(ArangoServerError):
+    """Failed to delete a backup."""
+
+
+class BackupDownloadError(ArangoServerError):
+    """Failed to download a backup from remote repository."""
+
+
+class BackupGetError(ArangoServerError):
+    """Failed to retrieve backup details."""
+
+
+class BackupRestoreError(ArangoServerError):
+    """Failed to restore from backup."""
+
+
+class BackupUploadError(ArangoServerError):
+    """Failed to upload a backup to remote repository."""
+
+
+##############################
 # Batch Execution Exceptions #
 ##############################
 
@@ -243,10 +279,6 @@ class CollectionLoadError(ArangoServerError):
 
 class CollectionUnloadError(ArangoServerError):
     """Failed to unload collection."""
-
-
-class CollectionRotateJournalError(ArangoServerError):
-    """Failed to rotate collection journal."""
 
 
 class CollectionRecalculateCountError(ArangoServerError):
@@ -617,6 +649,10 @@ class ServerTLSReloadError(ArangoServerError):
     """Failed to reload TLS."""
 
 
+class ServerEncryptionError(ArangoServerError):
+    """Failed to reload user-defined encryption keys."""
+
+
 #####################
 # Task Exceptions   #
 #####################
@@ -729,6 +765,7 @@ class ViewRenameError(ArangoServerError):
 # Analyzer Exceptions #
 #######################
 
+
 class AnalyzerListError(ArangoServerError):
     """Failed to retrieve analyzers."""
 
@@ -803,6 +840,7 @@ class WALTailError(ArangoServerError):
 # Replication Exceptions #
 ##########################
 
+
 class ReplicationInventoryError(ArangoServerError):
     """Failed to retrieve inventory of collection and indexes."""
 
@@ -871,6 +909,7 @@ class ReplicationServerIDError(ArangoServerError):
 # Cluster Exceptions #
 ######################
 
+
 class ClusterHealthError(ArangoServerError):
     """Failed to retrieve DBServer health."""
 
@@ -903,9 +942,14 @@ class ClusterEndpointsError(ArangoServerError):
     """Failed to retrieve cluster endpoints."""
 
 
+class ClusterServerCountError(ArangoServerError):
+    """Failed to retrieve cluster server count."""
+
+
 ##################
 # JWT Exceptions #
 ##################
+
 
 class JWTAuthError(ArangoServerError):
     """Failed to get a new JWT token from ArangoDB."""
